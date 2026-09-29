@@ -1,0 +1,4 @@
+# Runtime links and Lighteval sample caches; evaluation results are retained.
+cache/
+model_links/
+nltk_data/

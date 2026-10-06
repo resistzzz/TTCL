@@ -6,6 +6,10 @@
     <img alt="Paper" src="https://img.shields.io/badge/Paper-PDF-blue?logo=adobeacrobatreader&logoColor=white" height="20">
   </a>
   &nbsp;&nbsp;
+  <a href="https://arxiv.org/pdf/2610.02695">
+    <img alt="arXiv" src="https://img.shields.io/badge/arXiv-2610.02695-b31b1b?logo=arxiv&logoColor=white" height="20">
+  </a>
+  &nbsp;&nbsp;
   <a href="https://huggingface.co/collections/resistz/test-time-calibration-learning-ttcl-models">
     <img alt="Hugging Face Model" src="https://img.shields.io/badge/🤗%20Hugging%20Face-Model-yellow" height="20">
   </a>
@@ -171,3 +175,14 @@ We release all checkpoints trained by us on [huggingface](https://huggingface.co
 ## Citation
 
 If you use our datasets or models, please cite our paper!
+```
+@misc{zhang2026testtimecalibrationlearninglarge,
+      title={Test-time Calibration Learning for Large Language Model Reasoning}, 
+      author={Zizhuo Zhang and Xiong Peng and Jingwei Sun and Rong Yao and Shixiong Kai and Mingxuan Yuan and Bo Han},
+      year={2026},
+      eprint={2610.02695},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2610.02695}, 
+}
+```

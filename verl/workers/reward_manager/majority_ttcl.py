@@ -34,10 +34,8 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
 
     Correctness is a binary score against either the modal non-abstention
     answer in a rollout group or a pseudo label sampled from a frozen historical
-    target cache. Calibration is negative Brier score against the configured
-    frequency/LOO target. ``entropy_frequency`` and ``entropy_loo`` use
-    entropy-dependent shrinkage toward an EMA global support prior instead of
-    directly lowering every confidence target. Dataset ground truth is never
+    target cache. Calibration is negative Brier score against the answer's
+    frequency in its rollout group or epoch-lagged frequency cache. Dataset ground truth is never
     used for either reward, only for monitoring metrics when it is available.
 
     For a well-formed confidence field, ``reasoning_loss_mask`` covers tokens
@@ -54,10 +52,6 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
         num_examine: int,
         compute_score: Any = None,
         reward_fn_key: str = "data_source",
-        target_mode: str = "frequency",
-        entropy_coef: float | None = None,
-        entropy_shrinkage_rho: float | None = None,
-        prior_ema_beta: float = 0.95,
         target_cache_mode: str = "online",
         target_cache_ema_rate: float = 0.01,
         pseudo_label_source: str = "policy",
@@ -69,19 +63,16 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
                 "majority_ttcl.loss_mask_mode must be 'confidence' or "
                 f"'confidence_or_all', got {loss_mask_mode!r}."
             )
-        valid_target_modes = {"frequency", "loo", "entropy_frequency", "entropy_loo"}
-        if target_mode not in valid_target_modes:
-            raise ValueError(f"target_mode must be one of {sorted(valid_target_modes)}, got {target_mode!r}.")
         if target_cache_mode not in {"online", "epoch_ema"}:
             raise ValueError(
                 "target_cache_mode must be 'online' or 'epoch_ema', got " f"{target_cache_mode!r}."
             )
-        if pseudo_label_source not in {"policy", "target_cache_sample", "target_cache_majority"}:
+        if pseudo_label_source not in {"policy", "target_cache_majority"}:
             raise ValueError(
-                "pseudo_label_source must be 'policy', 'target_cache_sample', or 'target_cache_majority', got "
+                "pseudo_label_source must be 'policy' or 'target_cache_majority', got "
                 f"{pseudo_label_source!r}."
             )
-        if pseudo_label_source in {"target_cache_sample", "target_cache_majority"} and target_cache_mode != "epoch_ema":
+        if pseudo_label_source == "target_cache_majority" and target_cache_mode != "epoch_ema":
             raise ValueError(
                 "cache-based pseudo labels require target_cache_mode='epoch_ema'."
             )
@@ -89,30 +80,10 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
             raise ValueError(
                 "target_cache_ema_rate must be finite and in [0, 1], got " f"{target_cache_ema_rate!r}."
             )
-        # ``entropy_coef`` is retained as a compatibility alias for earlier
-        # experiments. New configurations should use entropy_shrinkage_rho.
-        if entropy_shrinkage_rho is None:
-            entropy_shrinkage_rho = 0.5 if entropy_coef is None else entropy_coef
-        if not math.isfinite(entropy_shrinkage_rho) or not 0.0 <= entropy_shrinkage_rho <= 1.0:
-            raise ValueError(
-                "entropy_shrinkage_rho must be finite and in [0, 1], got "
-                f"{entropy_shrinkage_rho!r}."
-            )
-        if not math.isfinite(prior_ema_beta) or not 0.0 <= prior_ema_beta < 1.0:
-            raise ValueError(
-                "prior_ema_beta must be finite and in [0, 1), got "
-                f"{prior_ema_beta!r}."
-            )
         self.tokenizer = tokenizer
         self.num_examine = num_examine
         self.compute_score = compute_score or default_compute_score
         self.reward_fn_key = reward_fn_key
-        self.target_mode = target_mode
-        self.entropy_shrinkage_rho = float(entropy_shrinkage_rho)
-        # beta is the historical EMA weight: beta * old + (1 - beta) * batch.
-        self.prior_ema_beta = float(prior_ema_beta)
-        self.frequency_prior_ema: float | None = None
-        self.loo_prior_ema: float | None = None
         # ``epoch_ema`` is a lagged target-policy approximation.  Every
         # question owns a small answer->support cache.  Rewards in epoch e
         # read q_e; current rollout supports are accumulated and only become
@@ -122,10 +93,8 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
         # Cache sampling makes correctness labels lagged too: both objectives
         # read q_e while only the epoch boundary can produce q_(e+1).
         self.pseudo_label_source = pseudo_label_source
-        self.target_cache: dict[str, dict[str, dict[str, float]]] = {}
-        self.pending_target_cache: defaultdict[str, list[dict[str, dict[str, float]]]] = defaultdict(list)
-        self.pending_frequency_priors: list[float] = []
-        self.pending_loo_priors: list[float] = []
+        self.target_cache: dict[str, dict[str, float]] = {}
+        self.pending_target_cache: defaultdict[str, list[dict[str, float]]] = defaultdict(list)
         self.target_cache_initialized = target_cache_mode == "online"
         self._initializing_target_cache = False
         self.last_target_cache_commit_metrics: dict[str, float] = {}
@@ -219,12 +188,6 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
         return None
 
     @staticmethod
-    def _update_ema(old_value: float | None, batch_value: float, beta: float) -> float:
-        """Update an EMA whose beta is the historical-value weight."""
-
-        return batch_value if old_value is None else beta * old_value + (1.0 - beta) * batch_value
-
-    @staticmethod
     def _is_cache_abstention_key(answer_key: str) -> bool:
         """Recognize abstentions after cache key whitespace normalization."""
 
@@ -251,16 +214,6 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
         total_mass = sum(probability for _, probability in candidates)
         return [(answer_key, probability / total_mass) for answer_key, probability in candidates] if total_mass else []
 
-    def _sample_cached_pseudo_label(self, frequency_map: dict[str, float]) -> tuple[str | None, float]:
-        """Sample one concrete pseudo answer from frozen q_e(y | x)."""
-
-        candidates = self._eligible_cached_pseudo_candidates(frequency_map)
-        if not candidates:
-            return None, 0.0
-        weights = torch.tensor([probability for _, probability in candidates], dtype=torch.float64)
-        selected_index = int(torch.multinomial(weights, num_samples=1).item())
-        return candidates[selected_index]
-
     def _majority_cached_pseudo_label(self, frequency_map: dict[str, float]) -> tuple[str | None, float]:
         """Deterministically select the modal concrete answer in frozen q_e."""
 
@@ -285,18 +238,11 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
         return f"{data_source}|{extra_info.get('split', '')}|{extra_info['index']}"
 
     @staticmethod
-    def _support_maps(answer_counts: Counter[str], group_size: int) -> dict[str, dict[str, float]]:
-        """Build answer-specific frequency and LOO support targets for one group."""
+    def _support_maps(answer_counts: Counter[str], group_size: int) -> dict[str, float]:
+        """Build answer-specific frequency targets for one group."""
 
         denominator = max(group_size, 1)
-        loo_denominator = group_size - 1
-        return {
-            "frequency": {answer: count / denominator for answer, count in answer_counts.items()},
-            "loo": {
-                answer: (count - 1) / loo_denominator if loo_denominator > 0 else 0.0
-                for answer, count in answer_counts.items()
-            },
-        }
+        return {answer: count / denominator for answer, count in answer_counts.items()}
 
     def needs_target_cache_initialization(self) -> bool:
         return self.target_cache_mode == "epoch_ema" and not self.target_cache_initialized
@@ -321,16 +267,9 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
             return {}
         if not self.target_cache:
             raise RuntimeError("majority_ttcl target-cache initialization produced no question targets.")
-        if self.pending_frequency_priors:
-            self.frequency_prior_ema = float(sum(self.pending_frequency_priors) / len(self.pending_frequency_priors))
-            self.loo_prior_ema = float(sum(self.pending_loo_priors) / len(self.pending_loo_priors))
-        self.pending_frequency_priors.clear()
-        self.pending_loo_priors.clear()
         self.target_cache_initialized = True
         metrics = {
             "target_cache/initialized_questions": float(len(self.target_cache)),
-            "target_cache/initial_frequency_prior": float(self.frequency_prior_ema or 0.0),
-            "target_cache/initial_loo_prior": float(self.loo_prior_ema or 0.0),
         }
         self.last_target_cache_commit_metrics = metrics
         return metrics
@@ -347,33 +286,21 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
         for question_key, observations in self.pending_target_cache.items():
             if not observations:
                 continue
-            old_maps = self.target_cache[question_key]
-            averaged_maps: dict[str, dict[str, float]] = {}
-            for mode in ("frequency", "loo"):
-                answer_keys = set().union(*(observation[mode] for observation in observations), old_maps[mode])
-                averaged_maps[mode] = {
-                    answer: sum(observation[mode].get(answer, 0.0) for observation in observations) / len(observations)
-                    for answer in answer_keys
-                }
-                for answer, current_value in averaged_maps[mode].items():
-                    old_value = old_maps[mode].get(answer, 0.0)
-                    new_value = (1.0 - self.target_cache_ema_rate) * old_value + self.target_cache_ema_rate * current_value
-                    update_delta_sum += abs(new_value - old_value)
-                    update_value_count += 1
-                    old_maps[mode][answer] = new_value
+            old_map = self.target_cache[question_key]
+            answer_keys = set().union(*observations, old_map)
+            averaged_map = {
+                answer: sum(observation.get(answer, 0.0) for observation in observations) / len(observations)
+                for answer in answer_keys
+            }
+            for answer, current_value in averaged_map.items():
+                old_value = old_map.get(answer, 0.0)
+                new_value = (1.0 - self.target_cache_ema_rate) * old_value + self.target_cache_ema_rate * current_value
+                update_delta_sum += abs(new_value - old_value)
+                update_value_count += 1
+                old_map[answer] = new_value
             updated_questions += 1
 
-        if self.pending_frequency_priors:
-            batch_frequency_prior = float(sum(self.pending_frequency_priors) / len(self.pending_frequency_priors))
-            batch_loo_prior = float(sum(self.pending_loo_priors) / len(self.pending_loo_priors))
-            self.frequency_prior_ema = self._update_ema(
-                self.frequency_prior_ema, batch_frequency_prior, self.prior_ema_beta
-            )
-            self.loo_prior_ema = self._update_ema(self.loo_prior_ema, batch_loo_prior, self.prior_ema_beta)
-
         self.pending_target_cache.clear()
-        self.pending_frequency_priors.clear()
-        self.pending_loo_priors.clear()
         metrics = {
             "target_cache/updated_questions": float(updated_questions),
             "target_cache/size": float(len(self.target_cache)),
@@ -386,17 +313,18 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
     def state_dict(self) -> dict[str, Any]:
         return {
             "target_cache": self.target_cache,
-            "frequency_prior_ema": self.frequency_prior_ema,
-            "loo_prior_ema": self.loo_prior_ema,
             "target_cache_initialized": self.target_cache_initialized,
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         if self.target_cache_mode != "epoch_ema":
             return
-        self.target_cache = state_dict.get("target_cache", {})
-        self.frequency_prior_ema = state_dict.get("frequency_prior_ema")
-        self.loo_prior_ema = state_dict.get("loo_prior_ema")
+        # Older checkpoints stored both frequency and LOO maps per question.
+        # Keep their frequency map when resuming after the target-mode cleanup.
+        self.target_cache = {
+            key: value.get("frequency", value) if isinstance(value, dict) else value
+            for key, value in state_dict.get("target_cache", {}).items()
+        }
         self.target_cache_initialized = bool(state_dict.get("target_cache_initialized", bool(self.target_cache)))
 
     def __call__(self, data: DataProto, return_dict: bool = False) -> torch.Tensor | dict[str, Any]:
@@ -430,13 +358,8 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
                 "valid_response_length": valid_response_length,
             }
 
-        # Build all group statistics before constructing targets. The batch
-        # support priors below follow pi = mean_i s_i(x): invalid/abstention
-        # rows add zero to the numerator but remain in the rollout denominator.
+        # Build group answer frequencies before constructing targets.
         group_stats: dict[Any, dict[str, Any]] = {}
-        frequency_support_sum = 0.0
-        loo_support_sum = 0.0
-        total_rollouts = 0
         for uid, indices in grouped_indices.items():
             group_size = len(indices)
             all_answer_counts = Counter(
@@ -452,19 +375,17 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
             ]
             eligible_counts = Counter(eligible_answer_keys)
             answer_entropy, normalized_entropy = _entropy_from_counts(all_answer_counts, group_size)
-            support_maps = self._support_maps(all_answer_counts, group_size)
+            support_map = self._support_maps(all_answer_counts, group_size)
             target_cache_key = self._target_cache_key(data[indices[0]]) if self.target_cache_mode == "epoch_ema" else None
             cache_hit = target_cache_key in self.target_cache if target_cache_key is not None else False
             if target_cache_key is not None and not cache_hit:
                 # This is normally populated by the pre-training rollout pass.
                 # Keep a safe lazy fallback for old/resumed runs with no cache.
-                self.target_cache[target_cache_key] = {
-                    mode: dict(values) for mode, values in support_maps.items()
-                }
+                self.target_cache[target_cache_key] = dict(support_map)
             group_stats[uid] = {
                 "group_size": group_size,
                 "all_answer_counts": all_answer_counts,
-                "support_maps": support_maps,
+                "support_map": support_map,
                 "target_cache_key": target_cache_key,
                 "target_cache_hit": cache_hit,
                 "eligible_answer_keys": eligible_answer_keys,
@@ -472,53 +393,27 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
                 "answer_entropy": answer_entropy,
                 "normalized_entropy": normalized_entropy,
             }
-            total_rollouts += group_size
-            for index in indices:
-                item = decoded[index]
-                answer = item["final_answer"] if item is not None else None
-                if answer is None or _is_abstention_answer(answer):
-                    continue
-                count = all_answer_counts[_answer_key(answer)]
-                frequency_support_sum += count / group_size
-                loo_support_sum += (count - 1) / (group_size - 1) if group_size > 1 else 0.0
-
-        batch_frequency_prior = frequency_support_sum / total_rollouts if total_rollouts else 0.0
-        batch_loo_prior = loo_support_sum / total_rollouts if total_rollouts else 0.0
-        # Targets use the prior accumulated before this batch. The first batch
-        # initializes it from its own estimate, avoiding an arbitrary zero.
-        frequency_prior_used = (
-            self.frequency_prior_ema if self.frequency_prior_ema is not None else batch_frequency_prior
-        )
-        loo_prior_used = self.loo_prior_ema if self.loo_prior_ema is not None else batch_loo_prior
 
         printed_groups = 0
         for uid, indices in grouped_indices.items():
             stats = group_stats[uid]
             group_size = stats["group_size"]
             all_answer_counts = stats["all_answer_counts"]
-            support_maps = stats["support_maps"]
+            support_map = stats["support_map"]
             target_cache_key = stats["target_cache_key"]
             target_cache_hit = stats["target_cache_hit"]
             eligible_answer_keys = stats["eligible_answer_keys"]
             eligible_counts = stats["eligible_counts"]
             answer_entropy = stats["answer_entropy"]
             normalized_entropy = stats["normalized_entropy"]
-            uses_entropy_target = self.target_mode.startswith("entropy_")
-            base_target_mode = self.target_mode.removeprefix("entropy_")
-            entropy_shrinkage_weight = (
-                self.entropy_shrinkage_rho * normalized_entropy if uses_entropy_target else 0.0
-            )
 
             pseudo_label_key: str | None = None
             pseudo_label_answer: str | None = None
             pseudo_label_support_ratio = 0.0
-            if self.pseudo_label_source in {"target_cache_sample", "target_cache_majority"} and not self._initializing_target_cache:
+            if self.pseudo_label_source == "target_cache_majority" and not self._initializing_target_cache:
                 assert target_cache_key is not None
-                cached_frequency = self.target_cache[target_cache_key]["frequency"]
-                if self.pseudo_label_source == "target_cache_sample":
-                    pseudo_label_key, pseudo_label_support_ratio = self._sample_cached_pseudo_label(cached_frequency)
-                else:
-                    pseudo_label_key, pseudo_label_support_ratio = self._majority_cached_pseudo_label(cached_frequency)
+                cached_frequency = self.target_cache[target_cache_key]
+                pseudo_label_key, pseudo_label_support_ratio = self._majority_cached_pseudo_label(cached_frequency)
                 # Cache keys are normalized parsed answers. This is sufficient for
                 # the existing scorer, which receives _pseudo_ground_truth(key).
                 pseudo_label_answer = pseudo_label_key
@@ -551,22 +446,16 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
                 answer_count = all_answer_counts[_answer_key(final_answer)]
 
                 base_confidence_target = 0.0
-                prior_used = frequency_prior_used if base_target_mode == "frequency" else loo_prior_used
                 if is_abstention or not valid_answer:
                     confidence_target = 0.0
                 else:
                     answer_key = _answer_key(final_answer)
                     if self.target_cache_mode == "epoch_ema":
                         assert target_cache_key is not None
-                        base_confidence_target = self.target_cache[target_cache_key][base_target_mode].get(answer_key, 0.0)
-                    elif base_target_mode == "frequency":
-                        base_confidence_target = answer_count / group_size
+                        base_confidence_target = self.target_cache[target_cache_key].get(answer_key, 0.0)
                     else:
-                        base_confidence_target = (answer_count - 1) / (group_size - 1) if group_size > 1 else 0.0
-                    confidence_target = (
-                        (1.0 - entropy_shrinkage_weight) * base_confidence_target
-                        + entropy_shrinkage_weight * prior_used
-                    )
+                        base_confidence_target = answer_count / group_size
+                    confidence_target = base_confidence_target
 
                 pseudo_correctness = self._pseudo_correctness(data[index], final_answer, pseudo_label_answer)
                 actual_correctness = self._monitor_answer_correctness(data[index], final_answer)
@@ -603,7 +492,7 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
                 reward_extra_info["pseudo_label_support_ratio"].append(pseudo_label_support_ratio)
                 reward_extra_info["pseudo_label_valid"].append(pseudo_label_key is not None)
                 reward_extra_info["pseudo_label_from_cache"].append(
-                    self.pseudo_label_source in {"target_cache_sample", "target_cache_majority"}
+                    self.pseudo_label_source == "target_cache_majority"
                 )
                 reward_extra_info["correctness_answer_support_count"].append(
                     eligible_counts[_answer_key(final_answer)] if valid_answer and not is_abstention else 0
@@ -615,14 +504,8 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
                 reward_extra_info["is_abstention"].append(is_abstention)
                 reward_extra_info["answer_frequency_target"].append(confidence_target)
                 reward_extra_info["base_confidence_target"].append(0.0 if is_abstention else base_confidence_target)
-                reward_extra_info["entropy_shrinkage_weight"].append(entropy_shrinkage_weight)
-                reward_extra_info["entropy_shrinkage_rho"].append(self.entropy_shrinkage_rho)
                 reward_extra_info["target_cache_hit"].append(target_cache_hit)
                 reward_extra_info["target_cache_ema_rate"].append(self.target_cache_ema_rate)
-                reward_extra_info["prior_ema_beta"].append(self.prior_ema_beta)
-                reward_extra_info["support_prior_used"].append(prior_used)
-                reward_extra_info["batch_frequency_prior"].append(batch_frequency_prior)
-                reward_extra_info["batch_loo_prior"].append(batch_loo_prior)
                 reward_extra_info["calibration_answer_support_count"].append(answer_count)
                 reward_extra_info["brier_score"].append(brier_score)
                 reward_extra_info["answer_entropy"].append(answer_entropy)
@@ -636,34 +519,14 @@ class MajorityTTCLRewardManager(AbstractRewardManager):
 
             if self.target_cache_mode == "epoch_ema" and not self._initializing_target_cache:
                 assert target_cache_key is not None
-                self.pending_target_cache[target_cache_key].append(support_maps)
+                self.pending_target_cache[target_cache_key].append(support_map)
 
             if printed_groups < self.num_examine:
                 printed_groups += 1
                 print("[majority_ttcl uid]", uid)
-                print("[majority_ttcl target_mode]", self.target_mode)
                 print("[majority_ttcl answer_counts]", dict(all_answer_counts))
                 print("[majority_ttcl pseudo_label_source]", self.pseudo_label_source)
                 print("[majority_ttcl pseudo_label]", pseudo_label_key)
-                print("[majority_ttcl entropy_shrinkage_weight]", entropy_shrinkage_weight)
-                print("[majority_ttcl support_prior_used]", prior_used)
-
-        if self.target_cache_mode == "epoch_ema":
-            # Keep entropy priors lagged together with the per-question
-            # supports.  During q_0 initialization these values are averaged
-            # and installed in finalize_target_cache_initialization().
-            self.pending_frequency_priors.append(batch_frequency_prior)
-            self.pending_loo_priors.append(batch_loo_prior)
-        else:
-            self.frequency_prior_ema = self._update_ema(
-                self.frequency_prior_ema, batch_frequency_prior, self.prior_ema_beta
-            )
-            self.loo_prior_ema = self._update_ema(self.loo_prior_ema, batch_loo_prior, self.prior_ema_beta)
-        for values_key, value in (
-            ("frequency_prior_ema", self.frequency_prior_ema),
-            ("loo_prior_ema", self.loo_prior_ema),
-        ):
-            reward_extra_info[values_key].extend([value] * len(data))
 
         # These masks and component rewards are consumed synchronously by the
         # trainer/actor.  Keep their sum as the ordinary reward tensor for

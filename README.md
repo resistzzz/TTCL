@@ -45,8 +45,7 @@
 
 ## Setup
 
-Create a Python environment with a PyTorch/CUDA version appropriate for your
-hardware, activate it, and install the project dependencies with:
+Create a Python environment with a PyTorch/CUDA version appropriate for your hardware, activate it, and install the project dependencies with:
 
 ```bash
 USE_MEGATRON=0 USE_SGLANG=0 bash scripts/install_vllm_sglang_mcore.sh
@@ -54,13 +53,11 @@ USE_MEGATRON=0 USE_SGLANG=0 bash scripts/install_vllm_sglang_mcore.sh
 
 As we use `vllm` as inference engine and `fsdp` as training backbone, we do not need to install `sglang` and `megatron`.
 
-The training and evaluation scripts require a local Hugging Face model
-checkpoint.
+The training and evaluation scripts require a local Hugging Face model checkpoint.
 
 ## Data and models
 
-Datasets are located in `data/`. Set every model path in the launch scripts to
-a local checkpoint directory before running an experiment.
+Datasets are located in `data/`. Set every model path in the launch scripts to a local checkpoint directory before running an experiment.
 
 ## Train TTCL
 
@@ -70,12 +67,9 @@ The TTCL training launcher is:
 bash scripts/majority_ttcl/run.sh
 ```
 
-This launcher runs the listed experiments serially. Configure `LLM_PATH`,
-`MODEL_NAME`, and the experiment list in `scripts/majority_ttcl/run.sh` before
-launching. Training hyperparameters are defined in
-`scripts/majority_ttcl/run_majority_ttcl.sh`; per-dataset settings are in the
-corresponding `run_majority_ttcl_*.sh` files. Configure experiment logging
-locally if it is needed.
+This launcher runs the listed experiments serially. Configure `LLM_PATH`, `MODEL_NAME`, and the experiment list in `scripts/majority_ttcl/run.sh` before launching. Training hyperparameters are defined in `scripts/majority_ttcl/run_majority_ttcl.sh`; per-dataset settings are in the corresponding `run_majority_ttcl_*.sh` files. Configure experiment logging locally if it is needed.
+
+Given a model, it will train TTCL with the model sequentially on AIME24, MATH500, AIME25, AMC23, AIME26, NQ, HotpotQA, TriviaQA, SimpleQA, ChineseSimpleQA, Law and Finance. To train on only a specific dataset, simply comment out the code corresponding to the other datasets.
 
 ## Evaluation
 
@@ -126,13 +120,16 @@ We release all checkpoints trained by us on [huggingface](https://huggingface.co
 | TTCL-AIME24-Llama-3.1-8B-Instruct | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-AIME24-Llama-3.1-8B-Instruct) |
 | TTCL-AIME25-Llama-3.1-8B-Instruct | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-AIME25-Llama-3.1-8B-Instruct) |
 | TTCL-SimpleQA-Llama-3.1-8B-Instruct | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-SimpleQA-Llama-3.1-8B-Instruct) |
+| TTCL-Law-Llama-3.1-8B-Instruct | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-Law-Llama-3.1-8B-Instruct) |
 
 ### RLCR-calibrated models
 | Model Name | Model Size | Method | Hugging Face Link |
 | --- | --- | --- | --- |
 | RLCR-calibrated Qwen3-4B on DAPO-Math-14K | 4B | RLCR | [View Model](https://huggingface.co/resistz/RLCR-Calibrated-Qwen3-4B-DAPO-Math14k-3Epoch-330Step) |
 | RLCR-calibrated Qwen3-8B on DAPO-Math-14K | 8B | RLCR | [View Model](https://huggingface.co/resistz/RLCR-Calibrated-Qwen3-8B-DAPO-Math14k-3Epoch-330Step) |
-| RLCR-calibrated Qwen3-4B on FactQA-10K | 4B | TTCL | [View Model](https://huggingface.co/resistz/RLCR-Calibrated-Qwen3-4B-FactQA10K-3Epoch-234Step) |
+| RLCR-calibrated InternLM3-8B-Instruct on DAPO-Math-14K | 8B | RLCR | [View Model](https://huggingface.co/resistz/RLCR-Calibrated-Internlm3-8B-Instruct-DAPO-Math14K) |
+| RLCR-calibrated Llama-3.1-8B-Instruct on DAPO-Math-14K | 8B | RLCR | [View Model](https://huggingface.co/resistz/RLCR-Calibrated-Llama-3.1-8B-Instruct-DAPO-Math14K-40Step) |
+| RLCR-calibrated Qwen3-4B on FactQA-10K | 4B | RLCR | [View Model](https://huggingface.co/resistz/RLCR-Calibrated-Qwen3-4B-FactQA10K-3Epoch-234Step) |
 
 ### TTCL for RLCR-calibrated Qwen3-4B on DAPO-Math-14K
 | Model Name | Model Size | Method | Hugging Face Link |
@@ -162,6 +159,23 @@ We release all checkpoints trained by us on [huggingface](https://huggingface.co
 | TTCL-HotpotQA-RLCR-Qwen3-8B-DAPO-Math14K | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-HotpotQA-RLCR-Qwen3-8B-DAPO-Math14K) |
 | TTCL-TriviaQA-RLCR-Qwen3-8B-DAPO-Math14K | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-TriviaQA-RLCR-Qwen3-8B-DAPO-Math14K) |
 
+### TTCL for RLCR-calibrated InternLM-3-8B-Instruct on DAPO-Math-14K
+| Model Name | Model Size | Method | Hugging Face Link |
+| --- | --- | --- | --- |
+| TTCL-SimpleQA-RLCR-InternLM3-8B-Instruct | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-SimpleQA-RLCR-Internlm3-8B-Instruct-DAPO-Math14K) |
+| TTCL-ChineseSimpleQA-RLCR-InternLM3-8B-Instruct | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-ChineseSimpleQA-RLCR-InternLM3-8B-Instruct-DAPO-Math14K) |
+
+### TTCL for RLCR-calibrated Llama-3.1-8B-Instruct on DAPO-Math-14K
+
+Note: according to our experiment, existing RLCR is less effective for Llama-3.1-8B-Instruct; however, TTCL can still improve its performance on the target benchmark to some extent.
+| Model Name | Model Size | Method | Hugging Face Link |
+| --- | --- | --- | --- |
+| TTCL-SimpleQA-RLCR-Llama-3.1-8B-Instruct-DAPO-Math14K | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-SimpleQA-RLCR-Llama-3.1-8B-Instruct-DAPO-Math14K) |
+| TTCL-ChineseSimpleQA-RLCR-Llama-3.1-8B-Instruct | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-ChineseSimpleQA-RLCR-Llama-3.1-8B-Instruct-DAPO-Math14K) |
+| TTCL-NQ-RLCR-Llama-3.1-8B-Instruct | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-NQ-RLCR-Llama-3.1-8B-Instruct-DAPO-Math14K) |
+| TTCL-HotpotQA-RLCR-Llama-3.1-8B-Instruct | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-HotpotQA-RLCR-Llama-3.1-8B-Instruct-DAPO-Math14K) |
+| TTCL-TriviaQA-RLCR-Llama-3.1-8B-Instruct | 8B | TTCL | [View Model](https://huggingface.co/resistz/TTCL-TriviaQA-RLCR-Llama-3.1-8B-Instruct-DAPO-Math14K) |
+
 ### TTCL for RLCR-calibrated Qwen3-4B on FactQA-10K
 | Model Name | Model Size | Method | Hugging Face Link |
 | --- | --- | --- | --- |
@@ -176,13 +190,10 @@ We release all checkpoints trained by us on [huggingface](https://huggingface.co
 
 If you use our datasets or models, please cite our paper!
 ```
-@misc{zhang2026testtimecalibrationlearninglarge,
-      title={Test-time Calibration Learning for Large Language Model Reasoning}, 
-      author={Zizhuo Zhang and Xiong Peng and Jingwei Sun and Rong Yao and Shixiong Kai and Mingxuan Yuan and Bo Han},
-      year={2026},
-      eprint={2610.02695},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2610.02695}, 
+@article{zhang2026test,
+  title={Test-time Calibration Learning for Large Language Model Reasoning},
+  author={Zhang, Zizhuo and Peng, Xiong and Sun, Jingwei and Yao, Rong and Kai, Shixiong and Yuan, Mingxuan and Han, Bo},
+  journal={arXiv preprint arXiv:2610.02695},
+  year={2026}
 }
 ```

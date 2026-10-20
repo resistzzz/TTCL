@@ -34,18 +34,9 @@ TOTAL_EPOCHS="${TOTAL_EPOCHS:-10}"
 TEST_FREQ="${TEST_FREQ:-20}"
 SAVE_FREQ="${SAVE_FREQ:-20}"
 VAL_ECE_BINS="${VAL_ECE_BINS:-10}"
+MAX_PROMPT_LEN="${MAX_PROMPT_LEN:-1024}"
+MAX_RESPONSE_LEN="${MAX_RESPONSE_LEN:-4096}"
 
-# frequency | loo | entropy_frequency | entropy_loo
-TARGET_MODE="${TARGET_MODE:-frequency}"
-case "${TARGET_MODE}" in
-  frequency|loo|entropy_frequency|entropy_loo) ;;
-  *) echo "Invalid TARGET_MODE: ${TARGET_MODE}" >&2; exit 1 ;;
-esac
-# Entropy modes shrink a noisy local support target toward an EMA global
-# support prior: (1 - rho * H/log K) * support + rho * H/log K * prior.
-ENTROPY_SHRINKAGE_RHO="${ENTROPY_SHRINKAGE_RHO:-0.5}"
-# Historical weight in prior_t = beta * prior_(t-1) + (1-beta) * batch_prior.
-PRIOR_EMA_BETA="${PRIOR_EMA_BETA:-0.95}"
 # online: the historical behaviour, using the current rollout group's support.
 # epoch_ema: initialize q_0 with one frozen-policy rollout pass, then use a
 # per-question target cache that is only updated after each training epoch.
@@ -63,13 +54,12 @@ case "${LOSS_MASK_MODE}" in
   *) echo "Invalid LOSS_MASK_MODE: ${LOSS_MASK_MODE}" >&2; exit 1 ;;
 esac
 
-# Correctness labels: policy is the in-group majority baseline;
-# target_cache_sample samples one label from frozen per-question q_e(y | x);
-# target_cache_majority deterministically selects argmax_y q_e(y | x).
+# Correctness labels: policy uses the current in-group majority;
+# target_cache_majority selects argmax_y q_e(y | x).
 # The cache is updated only at epoch boundaries by TARGET_CACHE_EMA_RATE.
-PSEUDO_LABEL_SOURCE="${PSEUDO_LABEL_SOURCE:-target_cache_sample}"
+PSEUDO_LABEL_SOURCE="${PSEUDO_LABEL_SOURCE:-target_cache_majority}"
 case "${PSEUDO_LABEL_SOURCE}" in
-  policy|target_cache_sample|target_cache_majority) ;;
+  policy|target_cache_majority) ;;
   *) echo "Invalid PSEUDO_LABEL_SOURCE: ${PSEUDO_LABEL_SOURCE}" >&2; exit 1 ;;
 esac
 if [[ "${PSEUDO_LABEL_SOURCE}" != "policy" && "${TARGET_CACHE_MODE}" != "epoch_ema" ]]; then
@@ -80,24 +70,17 @@ fi
 NORM_ADV_BY_STD="${NORM_ADV_BY_STD:-False}"
 LOSS_MODE="${LOSS_MODE:-vanilla}"
 PROJECT_NAME="${PROJECT_NAME:-Calibration}"
-if [[ "${TARGET_MODE}" == entropy_* ]]; then
-    ENTROPY_EXP_SUFFIX="_Rho${ENTROPY_SHRINKAGE_RHO}-EmaBeta${PRIOR_EMA_BETA}"
-else
-    ENTROPY_EXP_SUFFIX=""
-fi
 if [[ "${TARGET_CACHE_MODE}" == "epoch_ema" ]]; then
     TARGET_CACHE_EXP_SUFFIX="_EpochTargetEma${TARGET_CACHE_EMA_RATE}"
 else
     TARGET_CACHE_EXP_SUFFIX="_OnlineTarget"
 fi
-if [[ "${PSEUDO_LABEL_SOURCE}" == "target_cache_sample" ]]; then
-    PSEUDO_LABEL_EXP_SUFFIX="_PSamp"
-elif [[ "${PSEUDO_LABEL_SOURCE}" == "target_cache_majority" ]]; then
+if [[ "${PSEUDO_LABEL_SOURCE}" == "target_cache_majority" ]]; then
     PSEUDO_LABEL_EXP_SUFFIX="_PMajor"
 else
     PSEUDO_LABEL_EXP_SUFFIX="_PPol"
 fi
-EXP_NAME="${EXP_NAME:-MajorityTTCL_${DATA_NAME}_${MODEL_NAME}_${TARGET_MODE}${ENTROPY_EXP_SUFFIX}${TARGET_CACHE_EXP_SUFFIX}${PSEUDO_LABEL_EXP_SUFFIX}_${LOSS_MASK_MODE}_K${N}}"
+EXP_NAME="${EXP_NAME:-MajorityTTCL_${DATA_NAME}_${MODEL_NAME}_frequency${TARGET_CACHE_EXP_SUFFIX}${PSEUDO_LABEL_EXP_SUFFIX}_${LOSS_MASK_MODE}_K${N}}"
 
 mkdir -p wandb "rollout_log/${EXP_NAME}/train" "rollout_log/${EXP_NAME}/val"
 
@@ -110,8 +93,8 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
     data.train_batch_size="${TRAIN_BATCH_SIZE}" \
-    data.max_prompt_length=1024 \
-    data.max_response_length=4096 \
+    data.max_prompt_length="${MAX_PROMPT_LEN}" \
+    data.max_response_length="${MAX_RESPONSE_LEN}" \
     data.filter_overlong_prompts=true \
     data.truncation=error \
     +data.apply_chat_template_kwargs='{enable_thinking:false}' \
@@ -141,9 +124,6 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=true \
     reward_model.reward_manager=majority_ttcl \
     +reward_model.ece_bins="${VAL_ECE_BINS}" \
-    +reward_model.reward_kwargs.target_mode="${TARGET_MODE}" \
-    +reward_model.reward_kwargs.entropy_shrinkage_rho="${ENTROPY_SHRINKAGE_RHO}" \
-    +reward_model.reward_kwargs.prior_ema_beta="${PRIOR_EMA_BETA}" \
     +reward_model.reward_kwargs.target_cache_mode="${TARGET_CACHE_MODE}" \
     +reward_model.reward_kwargs.target_cache_ema_rate="${TARGET_CACHE_EMA_RATE}" \
     +reward_model.reward_kwargs.pseudo_label_source="${PSEUDO_LABEL_SOURCE}" \
